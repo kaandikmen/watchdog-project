@@ -16,7 +16,7 @@ static void graceful_shutdown(void)
     struct timespec ts = {0, POLL_INTERVAL_MS * 1000000L};
     int waited_ms = 0;
 
-    logger_log("Shutdown requested: sending SIGTERM to children");
+    logger_log("SHUTDOWN initiated, sending SIGTERM to workers");
     pm_stop_restarts();
     pm_signal_all(SIGTERM);
 
@@ -28,13 +28,13 @@ static void graceful_shutdown(void)
 
     if (pm_reap_nonblocking() > 0)
     {
-        logger_log("Timeout: sending SIGKILL to remaining children");
+        logger_log("SHUTDOWN timeout, sending SIGKILL to remaining workers");
         pm_signal_all(SIGKILL);
         while (pm_reap_nonblocking() > 0)
             nanosleep(&ts, NULL);
     }
 
-    logger_log("All children reaped, watchdog exiting");
+    logger_log("SHUTDOWN complete");
 }
 
 int main(void)
@@ -66,10 +66,10 @@ int main(void)
         return EXIT_FAILURE;
     }
 
-    logger_log("Watchdog started (pid=%d)", (int)getpid());
+    logger_log("watchdog started pid=%d", (int)getpid());
     if (pm_start_all(&orig_set) == -1)
     {
-        logger_log("Failed to start child processes");
+        logger_log("failed to start worker processes");
         logger_close();
         return EXIT_FAILURE;
     }
@@ -77,6 +77,9 @@ int main(void)
     while (!g_shutdown_requested)
     {
         sigsuspend(&orig_set);
+
+        /* Once cocuklari topla, sonra raporla: rapor guncel durumu gostersin. */
+        pm_handle_events();
 
         if (g_status_requested)
         {
@@ -86,7 +89,6 @@ int main(void)
             w = pm_get_workers(&n);
             logger_report_status(w, n);
         }
-        pm_handle_events();
     }
 
     graceful_shutdown();

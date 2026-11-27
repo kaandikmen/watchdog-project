@@ -42,6 +42,13 @@ In a second terminal, send signals to the watchdog PID (printed at start / `pgre
 Always check that `<WORKER_PID>` really belongs to a `worker` process
 (`ps -p <PID> -o comm=`) before killing it.
 
+By default the watchdog starts 4 workers (IDs 1-4) that run until they are stopped.
+For a quick demo of every behaviour without sending any signal, start it with
+`WATCHDOG_DEMO=1 ./watchdog`: worker 3 then exits with code 0 after 3 s (normal exit,
+not restarted) and worker 4 exits with code 1 after 1 s (restarted 3 times, then
+`RESTART LIMIT`). A health check line (`Health check: N/4 workers running`) is written
+every 5 s in both modes.
+
 ## Project structure
 
 ```
@@ -82,7 +89,11 @@ Messages used by the watchdog (the test script searches for these keywords, case
 | Restart | `RESTART worker 1 attempt 2/3` |
 | Restart limit | `RESTART LIMIT reached for worker 1, giving up` |
 | Status report | `=== STATUS REPORT (SIGUSR1) ===` followed by one `worker N \| pid=... \| state=... \| restarts=...` line per worker |
-| Shutdown | `SHUTDOWN initiated ...` and `SHUTDOWN complete` |
+| Shutdown | `SHUTDOWN initiated, sending SIGTERM to workers` ... `SHUTDOWN complete` |
+| Shutdown timeout | `SHUTDOWN timeout, sending SIGKILL to remaining workers` (only if a worker ignores SIGTERM for 5 s) |
+| Signal sent | `Sent signal 15 to worker 1 pid=4242` |
+| Health check | `Health check: 4/4 workers running` (every 5 s) |
+| Watchdog start | `watchdog started pid=4200` |
 
 ## Logger API (`include/logger.h`)
 
@@ -111,10 +122,43 @@ Scenario descriptions and results: [docs/TEST_SCENARIOS.md](docs/TEST_SCENARIOS.
 The Ctrl+C shutdown must also be verified manually: start `./watchdog`, press `Ctrl+C`,
 then check that no `worker` process remains (`pgrep worker`) and the log contains the shutdown lines.
 
+Result of the last run: `make test` -> 19 passed, 0 failed (`make test-mock` -> 19 passed, 0 failed).
+
 ## Sample log
 
+Real run with `WATCHDOG_DEMO=1`, `kill -USR1` after ~6 s, then `kill -TERM`:
+
 ```
-(paste output of watchdog.log from a real run here)
+[2026-11-27 22:21:49] watchdog started pid=1983
+[2026-11-27 22:21:49] STARTED worker 1 pid=1985
+[2026-11-27 22:21:49] STARTED worker 2 pid=1986
+[2026-11-27 22:21:49] STARTED worker 3 pid=1987
+[2026-11-27 22:21:49] STARTED worker 4 pid=1988
+[2026-11-27 22:21:50] TERMINATED worker 4 pid=1988 error exit code=1
+[2026-11-27 22:21:50] RESTART worker 4 attempt 1/3
+[2026-11-27 22:21:50] STARTED worker 4 pid=1989
+[2026-11-27 22:21:51] TERMINATED worker 4 pid=1989 error exit code=1
+[2026-11-27 22:21:51] RESTART worker 4 attempt 2/3
+[2026-11-27 22:21:51] STARTED worker 4 pid=1990
+[2026-11-27 22:21:52] EXITED NORMALLY worker 3 pid=1987 code=0
+[2026-11-27 22:21:52] TERMINATED worker 4 pid=1990 error exit code=1
+[2026-11-27 22:21:52] RESTART worker 4 attempt 3/3
+[2026-11-27 22:21:52] STARTED worker 4 pid=1991
+[2026-11-27 22:21:53] TERMINATED worker 4 pid=1991 error exit code=1
+[2026-11-27 22:21:53] RESTART LIMIT reached for worker 4, giving up
+[2026-11-27 22:21:54] Health check: 2/4 workers running
+[2026-11-27 22:21:55] === STATUS REPORT (SIGUSR1) ===
+[2026-11-27 22:21:55] worker 1 | pid=1985 | state=RUNNING | restarts=0
+[2026-11-27 22:21:55] worker 2 | pid=1986 | state=RUNNING | restarts=0
+[2026-11-27 22:21:55] worker 3 | pid=0 | state=EXITED_NORMAL | restarts=0
+[2026-11-27 22:21:55] worker 4 | pid=0 | state=RESTART_LIMIT_REACHED | restarts=3
+[2026-11-27 22:21:55] === END OF REPORT ===
+[2026-11-27 22:21:56] SHUTDOWN initiated, sending SIGTERM to workers
+[2026-11-27 22:21:56] Sent signal 15 to worker 1 pid=1985
+[2026-11-27 22:21:56] Sent signal 15 to worker 2 pid=1986
+[2026-11-27 22:21:56] KILLED BY SIGNAL worker 1 pid=1985 signal=15
+[2026-11-27 22:21:56] KILLED BY SIGNAL worker 2 pid=1986 signal=15
+[2026-11-27 22:21:56] SHUTDOWN complete
 ```
 
 ## Team

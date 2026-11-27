@@ -14,6 +14,7 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -27,12 +28,23 @@ typedef struct {
     const char *code;
 } worker_cfg_t;
 
-static const worker_cfg_t cfg[NUM_WORKERS] = {
-    { "0", "0" },   /* worker 0: surekli calisir                          */
-    { "0", "0" },   /* worker 1: surekli calisir                          */
-    { "3", "0" },   /* worker 2: 3 sn sonra exit(0) -> normal, restart yok */
-    { "1", "1" },   /* worker 3: 1 sn sonra exit(1) -> 3 restart, sonra limit */
+/* Varsayilan: tum worker'lar surekli calisir (test_scenarios.sh bunu varsayar).
+ * WATCHDOG_DEMO ortam degiskeni tanimliysa worker 3 ve 4 kendiliginden cikar
+ * (bkz. apply_demo_cfg). Worker ID'leri 1'den baslar, cfg[] 0'dan. */
+static worker_cfg_t cfg[NUM_WORKERS] = {
+    { "0", "0" },
+    { "0", "0" },
+    { "0", "0" },
+    { "0", "0" },
 };
+
+static void apply_demo_cfg(void)
+{
+    if (getenv("WATCHDOG_DEMO") == NULL)
+        return;
+    cfg[2].life = "3"; cfg[2].code = "0";   /* worker 3: 3 sn sonra exit(0) -> normal, restart yok */
+    cfg[3].life = "1"; cfg[3].code = "1";   /* worker 4: 1 sn sonra exit(1) -> 3 restart, sonra limit */
+}
 
 static worker_info_t workers[NUM_WORKERS];
 static sigset_t      child_mask;            /* exec oncesi geri yuklenecek maske */
@@ -80,8 +92,8 @@ static int spawn(worker_info_t *w)
     }
 
     if (pid == 0) {
-        char *const argv[] = { WORKER_PATH, (char *)cfg[w->id].life,
-                               (char *)cfg[w->id].code, NULL };
+        char *const argv[] = { WORKER_PATH, (char *)cfg[w->id - 1].life,
+                               (char *)cfg[w->id - 1].code, NULL };
         /* Ayri process group: terminaldeki Ctrl+C sadece watchdog'a gider,
          * cocuklari watchdog kontrollu sekilde kapatir. */
         setpgid(0, 0);
@@ -94,8 +106,7 @@ static int spawn(worker_info_t *w)
     setpgid(pid, pid);                          /* parent tarafinda da (yaris onlemi) */
     w->pid   = pid;
     w->state = STATE_RUNNING;
-    logger_log("Started worker %d (pid=%d, life=%ss, exit code=%s)",
-               w->id, (int)pid, cfg[w->id].life, cfg[w->id].code);
+    logger_log("STARTED worker %d pid=%d", w->id, (int)pid);
     return 0;
 }
 
@@ -109,15 +120,24 @@ int pm_start_all(const sigset_t *orig_mask)
         return -1;
     }
 
+    apply_demo_cfg();
+
     for (i = 0; i < NUM_WORKERS; i++) {
-        workers[i].id            = i;
+        workers[i].id            = i + 1;       /* ID'ler 1'den baslar */
         workers[i].pid           = 0;
         workers[i].restart_count = 0;
+        workers[i].state         = STATE_RESTART_LIMIT_REACHED; /* spawn basarirsa RUNNING olur */
         if (spawn(&workers[i]) == 0)
             started++;
     }
-    if (started < 2)
+    if (started < 2) {
+        /* Basarisiz baslangic: baslamis olanlari yetim birakma. */
+        restarts_enabled = 0;
+        pm_signal_all(SIGKILL);
+        while (waitpid(-1, NULL, 0) > 0 || errno == EINTR)
+            ;
         return -1;
+    }
 
     set_timer(HEALTH_CHECK_SEC);
     return 0;
@@ -140,18 +160,17 @@ static void handle_exit(worker_info_t *w, int status)
 
     if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
         w->state = STATE_EXITED_NORMAL;
-        logger_log("Worker %d (pid=%d) exited normally (code 0) - not restarted",
-                   w->id, (int)old);
+        logger_log("EXITED NORMALLY worker %d pid=%d code=0", w->id, (int)old);
         return;
     }
 
     if (WIFEXITED(status)) {
         w->state = STATE_EXITED_ERROR;
-        logger_log("Worker %d (pid=%d) exited with error code %d",
+        logger_log("TERMINATED worker %d pid=%d error exit code=%d",
                    w->id, (int)old, WEXITSTATUS(status));
     } else if (WIFSIGNALED(status)) {
         w->state = STATE_KILLED_BY_SIGNAL;
-        logger_log("Worker %d (pid=%d) killed by signal %d",
+        logger_log("KILLED BY SIGNAL worker %d pid=%d signal=%d",
                    w->id, (int)old, WTERMSIG(status));
     }
 
@@ -160,17 +179,18 @@ static void handle_exit(worker_info_t *w, int status)
 
     if (w->restart_count >= MAX_RESTARTS) {
         w->state = STATE_RESTART_LIMIT_REACHED;
-        logger_log("Worker %d reached restart limit (%d) - giving up",
-                   w->id, MAX_RESTARTS);
+        logger_log("RESTART LIMIT reached for worker %d, giving up", w->id);
         return;
     }
 
     w->restart_count++;
     w->state = STATE_RESTARTING;
-    logger_log("Restarting worker %d (attempt %d/%d)",
+    logger_log("RESTART worker %d attempt %d/%d",
                w->id, w->restart_count, MAX_RESTARTS);
-    if (spawn(w) == -1)
+    if (spawn(w) == -1) {
         w->state = STATE_RESTART_LIMIT_REACHED;
+        logger_log("RESTART LIMIT reached for worker %d, giving up (spawn failed)", w->id);
+    }
 }
 
 int pm_reap_nonblocking(void)
@@ -206,7 +226,7 @@ static void health_check(void)
             alive++;
         else
             logger_log("Health check: worker %d (pid=%d) not reachable: %s",
-                       i, (int)workers[i].pid, strerror(errno));
+                       workers[i].id, (int)workers[i].pid, strerror(errno));
     }
     logger_log("Health check: %d/%d workers running", alive, NUM_WORKERS);
 }
@@ -238,8 +258,8 @@ int pm_signal_all(int signo)
         if (workers[i].state != STATE_RUNNING)
             continue;
         if (kill(workers[i].pid, signo) == 0) {
-            logger_log("Sent signal %d to worker %d (pid=%d)",
-                       signo, i, (int)workers[i].pid);
+            logger_log("Sent signal %d to worker %d pid=%d",
+                       signo, workers[i].id, (int)workers[i].pid);
             sent++;
         } else {
             logger_log("kill(%d, %d) failed: %s",
