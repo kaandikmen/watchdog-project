@@ -1,5 +1,5 @@
-.DS_Store
 build/
 watchdog
 worker
-watchdog.log
+mock_watchdog
+*.log
