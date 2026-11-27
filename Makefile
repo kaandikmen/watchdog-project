@@ -17,10 +17,17 @@ build:
 worker: workers/worker.c
 	$(CC) $(CFLAGS) -o $@ $<
 
+# Gercek watchdog gelmeden test script'ini denemek icin sahte supervisor
+mock_watchdog: tests/mock_watchdog.c src/logger.c
+	$(CC) $(CFLAGS) -o $@ $^
+
 test: all
-	bash tests/test_scenarios.sh
+	WATCHDOG=./watchdog bash tests/test_scenarios.sh
+
+test-mock: mock_watchdog worker
+	WATCHDOG=./mock_watchdog bash tests/test_scenarios.sh
 
 clean:
-	rm -rf build watchdog worker watchdog.log
+	rm -rf build watchdog worker mock_watchdog watchdog.log
 
-.PHONY: all test clean
+.PHONY: all test test-mock clean
