@@ -92,10 +92,11 @@ n=$(awk '/STATUS REPORT/{f=1} f' "$LOG" | grep -c "pid=")
 
 T=$(children | head -1)
 if check_is_worker "$T"; then
+    N_BEFORE=$(children | wc -l)
     kill -USR2 "$T"       # worker temiz exit(0) yapar
     wait_log "normal" 4 && pass "normal sonlanma tespit edildi" || fail "normal sonlanma logu yok"
     sleep 2
-    ! kill -0 "$T" 2>/dev/null && [ "$(children | wc -l)" -eq 1 ] \
+    ! kill -0 "$T" 2>/dev/null && [ "$(children | wc -l)" -eq $((N_BEFORE - 1)) ] \
         && pass "normal cikan worker yeniden baslatilmadi" \
         || fail "normal cikan worker yeniden baslatildi"
 else
